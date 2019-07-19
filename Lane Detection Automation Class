@@ -1,0 +1,126 @@
+ % Step 1 contains properties that define the name and description of the algorithm, and the directions for using the algorithm.
+
+   %----------------------------------------------------------------------
+   % Step 1: Define required properties describing the algorithm. This
+   %         includes Name, Description, and UserDirections.
+   properties(Constant)
+       % Name: Give a name for your algorithm.
+       Name = 'Lane Detector';
+       % Description: Provide a one-line description for your algorithm.
+       Description = 'Automatically detect lane-like features';
+       % UserDirections: Provide a set of directions that are displayed
+       %                 when this algorithm is invoked. The directions
+       %                 are to be provided as a cell array of character
+       %                 vectors, with each element of the cell array
+       %                 representing a step in the list of directions.
+       UserDirections = {...
+           'Load a MonoCamera configuration object from the workspace using the settings panel',...
+           'Specify additional parameters in the settings panel',...
+           'Run the algorithm',...
+           'Manually inspect and modify results if needed'};
+   end
+ % Step 2 contains the custom properties needed for the core algorithm. The necessary properties were determined from the lane detection and lane point creation section above.
+
+   %---------------------------------------------------------------------
+   % Step 2: Define properties to be used during the algorithm. These are
+   % user-defined properties that can be defined to manage algorithm
+   % execution.
+   properties
+       %MonoCamera
+       %  The monoCamera object associated with this video
+       MonoCamera          = [];
+       %MonoCameraVarname
+       %  The workspace variable name of the monoCamera object
+       MonoCameraVarname   = '';
+       %BirdsEyeConfig
+       %  The birdsEyeView object needed to create the bird's-eye view
+       BirdsEyeConfig      = [];
+       %MaxNumLanes
+       %  The maximum number of lanes the algorithm tries to annotate
+       MaxNumLanes         = 2;
+       %ROI
+       %  The region of interest around the vehicle used to search for
+       %  lanes
+       ROI            = [3, 30, -3, 3];
+       %LaneMaskSensitivity
+       %  The sensitivity parameter used in the segmentLaneMarkerRidge function
+       LaneMaskSensitivity = 0.25;
+       %LaneBoundaryWidth
+       %  The lane boundary width, used in findParabolicLaneBoundaries
+       LaneBoundaryWidth   = 0.6;
+       %XPoints
+       %  The x-axis points along which to mark the lane boundaries
+       XPoints             = [3 3.5 4 4.5 5 6 7 10 30];
+   end
+% Step 3 deals with function definitions. The first function, checkLabelDefinition, ensures that only labels of the appropriate type are enabled for automation. For lane detection, you need to ensure that only labels of type Line are enabled, so this version of the function checks the Type of the labels:
+
+       function TF = checkLabelDefinition(~, labelDef)
+           % Lane detection only works with Line type labels
+           TF = labelDef.Type == labelType.Line;
+       end
+% The next function is checkSetup. Note that this algorithm requires a monoCamera sensor configuration to be available. All other properties have defined reasonable defaults.
+
+       function TF = checkSetup(algObj, ~)
+           % This is the only required input
+           TF = ~isempty(algObj.MonoCamera);
+       end
+% Next, the settingsDialog function obtains and modifies the properties defined in Step 2. This API call lets you create a dialog box that opens when a user clicks the Settings button in the Automate tab. To create this dialog box, use the inputdlg function to quickly create a simple modal window to ask a user to specify the monoCamera object. The following snippet of code outlines the basic syntax. The full AutoLaneMarking code extends this logic and also adds input validation steps.
+
+   % Describe the inputs
+   prompt = {...
+       'Enter the MonoCamera variable name',...
+       'Maximum number of Lanes',...
+       };
+   defaultAnswer = {...
+       '',...
+       num2str(2),...
+       };
+   % Create an input dialog
+   name = 'Settings for lane detection';
+   numLines = 1;
+   options.Resize      = 'on';
+   options.WindowStyle = 'normal';
+   options.Interpreter = 'none';
+   answer = inputdlg(prompt,name,numLines,defaultAnswer,options);
+   % Obtain the inputs
+   monoCameraVarname = answer{1};
+   maxNumberOfLanes  = answer{2};
+% Step 4 specifies the execution functions. Some automation algorithms need to implement an initialize routine to populate the initial algorithm state based on the existing labels in the app. This lane detection algorithm works on each frame independently, so the default version of the template has been trimmed to take no action.
+
+       function initialize(~, ~, ~)
+       end
+% Next, the run function defines the core lane detection algorithm of this automation class. run gets called for each video frame, and expects the automation class to return a set of labels. The run function in AutoLaneMarking contains the logic introduced previously for the lane detection and conversion to points. Code from helperMonoSensor has also been folded in for a more compact reference.
+
+       function autoLabels = run(algObj, I)
+           Ig = rgb2gray(I);
+           birdsEyeViewImage = transformImage(algObj.BirdsEyeConfig, Ig);
+           birdsEyeViewBW    = segmentLaneMarkerRidge(birdsEyeViewImage, ...
+               algObj.BirdsEyeConfig, algObj.LaneBoundaryWidth, ...
+               'Sensitivity', algObj.LaneMaskSensitivity);
+           % Obtain lane candidate points in world coordinates
+           [imageX, imageY] = find(birdsEyeViewBW);
+           boundaryPointsxy = imageToVehicle(algObj.BirdsEyeConfig, [imageY, imageX]);
+           % Fit requested number of boundaries to it
+           lbs = findParabolicLaneBoundaries(...
+               boundaryPointsxy,algObj.LaneBoundaryWidth, ...
+               'MaxNumBoundaries',algObj.MaxNumLanes);
+           numDetectedLanes = numel(lbs);
+           % Convert the model to discrete set of points at the specified
+           % x coordinates
+           boundaryPoints = cell(1,numDetectedLanes);
+           xPoints = algObj.XPoints';
+           for ind = 1:numel(lbs)
+               yPoints             = lbs(ind).computeBoundaryModel(xPoints);
+               boundaryPoints{ind} = vehicleToImage(algObj.MonoCamera, [xPoints, yPoints]);
+           end
+           % Package up the results in a table
+           autoLabels = table(...
+               boundaryPoints',...
+               repmat(labelType.Line, [numDetectedLanes,1]),...
+               repmat(algObj.SelectedLabelDefinitions.Name, [numDetectedLanes,1]));
+           autoLabels.Properties.VariableNames = {'Position','Type','Name'};
+       end
+% Finally, the terminate function handles any cleanup or tear-down required after the automation is done. This algorithm does not require any cleanup, so the function is empty.
+
+       function terminate(~)
+       end
